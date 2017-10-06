@@ -9,6 +9,8 @@ import (
 	"io"
 	"log"
 	"os"
+	"path"
+	"strings"
 	"sync"
 
 	"github.com/masterzen/winrm"
@@ -36,9 +38,10 @@ func doCopy(client *winrm.Client, config *Config, in io.Reader, toPath string) e
 
 	b64Enc := base64.NewEncoder(base64.StdEncoding, buf)
 
+	toPath = strings.Replace(toPath, "\\", "/", -1)
 	// Create a new zip archive.
 	w := zip.NewWriter(b64Enc)
-	f, err := w.Create(toPath)
+	f, err := w.Create(path.Base(toPath))
 	if err != nil {
 		return err
 	}
@@ -174,7 +177,7 @@ func writeChunk(client *winrm.Client, filePath, content string) error {
 	//scmd := fmt.Sprintf(`powershell.exe -Command "& {Set-Content -NoNewLine -Value '%s' -Path '%s'}"`, content, filePath)
 	scmd := fmt.Sprintf(`echo %s> "%s"`, content, filePath)
 
-	log.Println(scmd)
+	//log.Println(scmd)
 	log.Printf("Appending content: (len=%d)", len(scmd))
 
 	_, _, code, err := client.RunWithString(scmd, "")
@@ -198,17 +201,21 @@ func coalesce(client *winrm.Client, toPath string) error {
 	defer shell.Close()
 	script := fmt.Sprintf(`Add-Type -AssemblyName System.IO.Compression.FileSystem
 
-	Get-ChildItem $env:TEMP\winrmcp-*.tmp | Sort-Object {[int]$_.Name.Split("-.")[6]} | Get-Content -raw | foreach-object {$_ -replace "` + "`" + `n", ""} | Out-File -NoNewline $env:TEMP\combined.zip.b64
+	Get-ChildItem $env:TEMP\winrmcp-*.tmp | Sort-Object {[int]$_.Name.Split("-.")[6]} | Get-Content -raw | foreach-object {$_ -replace "`+"`"+`n", ""} | Out-File -NoNewline $env:TEMP\combined.zip.b64
 	$base64string = Get-Content -raw $env:TEMP\combined.zip.b64
 	[IO.File]::WriteAllBytes("$env:TEMP\combined.zip", [Convert]::FromBase64String($base64string))
-	[System.IO.Compression.ZipFile]::ExtractToDirectory("$env:TEMP\combined.zip", ".")
-	`)
+	[System.IO.Compression.ZipFile]::ExtractToDirectory("$env:TEMP\combined.zip", "%s")
+	`, toPath)
 
-	a, b, code, err := client.RunWithString(winrm.Powershell(script), "")
+	_, b, code, err := client.RunWithString(winrm.Powershell(script), "")
 	if err != nil {
 		return err
 	}
-	fmt.Println(a, b)
+	out, err := winrm.ParsePowershell(b)
+	if err != nil {
+		return err
+	}
+	fmt.Println("OUT: ", out)
 
 	if code != 0 {
 		return fmt.Errorf("restore operation returned code=%d", code)
