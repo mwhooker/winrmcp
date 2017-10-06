@@ -1,3 +1,13 @@
+/*
+
+mwhooker refactor todo:
+
+* make magic numbers configurable
+* make sure we move the file to the right place
+* clean up temp files
+* make debug logging respect debug log flag
+*/
+
 package winrmcp
 
 import (
@@ -117,33 +127,10 @@ func doCopy(client *winrm.Client, config *Config, in io.Reader, toPath string) e
 	coalesce(client, toPath)
 
 	/*
-
-		/*
-			done := false
-			for !done {
-				done, err = uploadChunks(client, tempPath, config.MaxOperationsPerShell, buf)
-				if err != nil {
-					return fmt.Errorf("Error uploading file to %s: %v", tempPath, err)
-				}
-			}
-
-			if os.Getenv("WINRMCP_DEBUG") != "" {
-				log.Printf("Moving file from %s to %s", tempPath, toPath)
-			}
-
-			err = restoreContent(client, tempPath, toPath)
-			if err != nil {
-				return fmt.Errorf("Error restoring file from %s to %s: %v", tempPath, toPath, err)
-			}
-
-			if os.Getenv("WINRMCP_DEBUG") != "" {
-				log.Printf("Removing temporary file %s", tempPath)
-			}
-
-			err = cleanupContent(client, tempPath)
-			if err != nil {
-				return fmt.Errorf("Error removing temporary file %s: %v", tempPath, err)
-			}
+		err = cleanupContent(client, tempPath)
+		if err != nil {
+			return fmt.Errorf("Error removing temporary file %s: %v", tempPath, err)
+		}
 	*/
 
 	return nil
