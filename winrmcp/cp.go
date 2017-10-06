@@ -9,7 +9,6 @@ import (
 	"log"
 	"os"
 	"path"
-	"strings"
 	"sync"
 
 	"github.com/masterzen/winrm"
@@ -28,8 +27,8 @@ func doCopy(client *winrm.Client, config *Config, in io.Reader, toPath string) e
 		return fmt.Errorf("Error generating unique filename: %v", err)
 	}
 
-	//tempFile := fmt.Sprintf("$env:TEMP\\winrmcp-%s-%%d.tmp", uniquePart)
-	tempFile := fmt.Sprintf("C:\\Users\\vagrant\\winrmcp-%s-%%d", uniquePart)
+	tempFile := fmt.Sprintf("%%%%TEMP%%%%\\winrmcp-%s-%%d.tmp", uniquePart)
+	//tempFile := fmt.Sprintf("C:\\Users\\vagrant\\winrmcp-%s-%%d", uniquePart)
 
 	// Create a buffer to write our archive to.
 	buf := new(bytes.Buffer)
@@ -55,7 +54,7 @@ func doCopy(client *winrm.Client, config *Config, in io.Reader, toPath string) e
 		return err
 	}
 
-	jobs := make(chan *uploadJob, 20)
+	jobs := make(chan *uploadJob, 2000)
 	var wg sync.WaitGroup
 
 	for i := 0; ; i++ {
@@ -75,7 +74,8 @@ func doCopy(client *winrm.Client, config *Config, in io.Reader, toPath string) e
 		wg.Add(1)
 		jobs <- &uploadJob{tempPathChunk, chunk, n}
 	}
-	for i := 0; i < 3; i++ {
+	concurrentUploads := 1
+	for i := 0; i < concurrentUploads; i++ {
 		go func() {
 			for j := range jobs {
 				if err := appendContent(client, j.uploadPath, string(j.chunk[:j.n])); err != nil {
@@ -125,7 +125,7 @@ func chunkSize(filePath string) int {
 	// Upload the file in chunks to get around the Windows command line size limit.
 
 	//return 8192 - len(filePath)
-	return 8000 - len(filePath)
+	return 7500 - len(filePath)
 }
 
 func restoreContent(client *winrm.Client, fromPath, toPath string) error {
@@ -226,11 +226,9 @@ func cleanupContent(client *winrm.Client, filePath string) error {
 }
 
 func appendContent(client *winrm.Client, filePath, content string) error {
-	scmd := fmt.Sprintf(`echo "%s" > "%s"`, strings.TrimSpace(content), filePath)
-	//scmd := fmt.Sprintf(`echo foob > "%s"`, filePath)
-	//scmd := `echo "foo" > "C:\\Users\\vagrant\\xyz2"`
+	scmd := fmt.Sprintf(`echo "%s" > "%s"`, content, filePath)
 
-	log.Printf("Appending content: %d, %q", len(scmd), scmd)
+	log.Printf("Appending content: (len=%d), %s", len(scmd), scmd)
 
 	out, errs, code, err := client.RunWithString(scmd, "")
 	fmt.Printf("out: %s\nerrs: %s\n", out, errs)
