@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -55,30 +56,37 @@ func doCopy(client *winrm.Client, config *Config, in io.Reader, toPath string) e
 	}
 
 	jobs := make(chan *uploadJob, 2000)
-	concurrentUploads := 30
+	concurrentUploads := 3
 	done := make(chan struct{})
+	defer close(done)
 	var wg sync.WaitGroup
 
+	wg.Add(concurrentUploads)
 	for i := 0; i < concurrentUploads; i++ {
-		go func() {
-			for {
-				select {
-				case j := <-jobs:
+		log.Printf("starting [%d]", i)
+		go func(wid int) {
+			func() {
+				for j := range jobs {
+					log.Printf("worker[%d]: doin a job", wid)
 					if err := retry(func() error {
+						if wid == 2 {
+							return errors.New("")
+						}
 						return writeChunk(client, j.uploadPath, string(j.chunk[:j.n]))
 					}, 3); err != nil {
-						for i := 0; i < concurrentUploads; i++ {
-							done <- struct{}{}
-						}
 						log.Printf("error appending: %s", err)
+						done <- struct{}{}
 					}
-					wg.Done()
-				case <-done:
-					return
+					select {
+					case <-done:
+						log.Println("worker is done")
+						return
+					default:
+					}
 				}
-
-			}
-		}()
+			}()
+			wg.Done()
+		}(i)
 	}
 
 	for i := 0; ; i++ {
@@ -95,10 +103,13 @@ func doCopy(client *winrm.Client, config *Config, in io.Reader, toPath string) e
 		}
 
 		log.Printf("making job %s. Uploading to %s", i, tempPathChunk)
-		wg.Add(1)
-		jobs <- &uploadJob{tempPathChunk, chunk, n}
+		select {
+		case jobs <- &uploadJob{tempPathChunk, chunk, n}:
+		case <-done:
+			return errors.New("upload cancelled")
+		}
 	}
-
+	close(jobs)
 	wg.Wait()
 
 	/*
@@ -137,8 +148,10 @@ type RetryableFunc func() error
 func retry(f RetryableFunc, maxTries int) error {
 	var err error
 	for i := 0; i < maxTries; i++ {
+		log.Printf("try %d", i)
 		err = f()
 		if err != nil {
+			log.Println(err.Error())
 			continue
 		}
 		return nil
@@ -149,10 +162,9 @@ func retry(f RetryableFunc, maxTries int) error {
 func writeChunk(client *winrm.Client, filePath, content string) error {
 	scmd := fmt.Sprintf(`echo "%s" > "%s"`, content, filePath)
 
-	//log.Printf("Appending content: (len=%d), %s", len(scmd), scmd)
+	log.Printf("Appending content: (len=%d)", len(scmd))
 
-	out, errs, code, err := client.RunWithString(scmd, "")
-	fmt.Printf("out: %s\nerrs: %s\n", out, errs)
+	_, _, code, err := client.RunWithString(scmd, "")
 
 	if err != nil {
 		return err
