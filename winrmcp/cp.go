@@ -58,7 +58,7 @@ func doCopy(client *winrm.Client, config *Config, in io.Reader, toPath string) e
 	var wg sync.WaitGroup
 
 	for i := 0; ; i++ {
-		tempPathChunk := fmt.Sprintf(tempFile, 0)
+		tempPathChunk := fmt.Sprintf(tempFile, i)
 		cs := chunkSize(tempPathChunk)
 		chunk := make([]byte, cs)
 		n, err := buf.Read(chunk)
@@ -226,7 +226,7 @@ func cleanupContent(client *winrm.Client, filePath string) error {
 }
 
 func appendContent(client *winrm.Client, filePath, content string) error {
-	scmd := fmt.Sprintf(`echo "%s" >> "%s"`, content, filePath)
+	scmd := fmt.Sprintf(`echo "%s" > "%s"`, content, filePath)
 
 	log.Printf("Appending content: (len=%d), %s", len(scmd), scmd)
 
