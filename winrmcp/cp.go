@@ -59,7 +59,7 @@ func doCopy(client *winrm.Client, config *Config, in io.Reader, toPath string) e
 	}
 
 	jobs := make(chan *uploadJob, 2000)
-	concurrentUploads := 30
+	concurrentUploads := 250
 	done := make(chan struct{})
 	//defer close(done)
 	var wg sync.WaitGroup
@@ -70,7 +70,7 @@ func doCopy(client *winrm.Client, config *Config, in io.Reader, toPath string) e
 		go func(wid int) {
 			func() {
 				for j := range jobs {
-					log.Printf("worker[%d]: doin a job", wid)
+					//log.Printf("worker[%d]: doin a job", wid)
 					if err := retry(func() error {
 						return writeChunk(client, j.uploadPath, string(j.chunk[:j.n]))
 					}, 3); err != nil {
@@ -154,7 +154,9 @@ type RetryableFunc func() error
 func retry(f RetryableFunc, maxTries int) error {
 	var err error
 	for i := 0; i < maxTries; i++ {
-		log.Printf("try %d", i)
+		if i > 0 {
+			log.Printf("try %d", i)
+		}
 		err = f()
 		if err != nil {
 			log.Println(err.Error())
@@ -178,7 +180,7 @@ func writeChunk(client *winrm.Client, filePath, content string) error {
 	scmd := fmt.Sprintf(`echo %s> "%s"`, content, filePath)
 
 	//log.Println(scmd)
-	log.Printf("Appending content: (len=%d)", len(scmd))
+	//log.Printf("Appending content: (len=%d)", len(scmd))
 
 	_, _, code, err := client.RunWithString(scmd, "")
 
