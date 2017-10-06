@@ -56,7 +56,7 @@ func doCopy(client *winrm.Client, config *Config, in io.Reader, toPath string) e
 	}
 
 	jobs := make(chan *uploadJob, 2000)
-	concurrentUploads := 3
+	concurrentUploads := 30
 	done := make(chan struct{})
 	defer close(done)
 	var wg sync.WaitGroup
@@ -69,9 +69,6 @@ func doCopy(client *winrm.Client, config *Config, in io.Reader, toPath string) e
 				for j := range jobs {
 					log.Printf("worker[%d]: doin a job", wid)
 					if err := retry(func() error {
-						if wid == 2 {
-							return errors.New("")
-						}
 						return writeChunk(client, j.uploadPath, string(j.chunk[:j.n]))
 					}, 3); err != nil {
 						log.Printf("error appending: %s", err)
