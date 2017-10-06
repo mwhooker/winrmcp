@@ -1,109 +1,131 @@
 package winrmcp
 
 import (
+	"archive/zip"
+	"bytes"
 	"encoding/base64"
 	"fmt"
 	"io"
 	"log"
 	"os"
+	"path"
+	"strings"
 	"sync"
 
 	"github.com/masterzen/winrm"
 	"github.com/nu7hatch/gouuid"
 )
 
+type uploadJob struct {
+	uploadPath string
+	chunk      []byte
+	n          int
+}
+
 func doCopy(client *winrm.Client, config *Config, in io.Reader, toPath string) error {
-	tempFile, err := tempFileName()
+	uniquePart, err := uuid.NewV4()
 	if err != nil {
 		return fmt.Errorf("Error generating unique filename: %v", err)
 	}
-	tempPath := "$env:TEMP\\" + tempFile
 
-	if os.Getenv("WINRMCP_DEBUG") != "" {
-		log.Printf("Copying file to %s\n", tempPath)
-	}
+	//tempFile := fmt.Sprintf("$env:TEMP\\winrmcp-%s-%%d.tmp", uniquePart)
+	tempFile := fmt.Sprintf("C:\\Users\\vagrant\\winrmcp-%s-%%d", uniquePart)
 
-	err = uploadContent(client, config.MaxOperationsPerShell, "%TEMP%\\"+tempFile, in)
+	// Create a buffer to write our archive to.
+	buf := new(bytes.Buffer)
+
+	b64Enc := base64.NewEncoder(base64.StdEncoding, buf)
+
+	// Create a new zip archive.
+	w := zip.NewWriter(b64Enc)
+	f, err := w.Create(path.Base(toPath))
 	if err != nil {
-		return fmt.Errorf("Error uploading file to %s: %v", tempPath, err)
+		return err
 	}
 
-	if os.Getenv("WINRMCP_DEBUG") != "" {
-		log.Printf("Moving file from %s to %s", tempPath, toPath)
+	if _, err := io.Copy(f, in); err != nil {
+		return err
+	}
+	// Make sure to check the error on Close.
+	if err := w.Close(); err != nil {
+		return err
 	}
 
-	err = restoreContent(client, tempPath, toPath)
-	if err != nil {
-		return fmt.Errorf("Error restoring file from %s to %s: %v", tempPath, toPath, err)
+	if err := b64Enc.Close(); err != nil {
+		return err
 	}
 
-	if os.Getenv("WINRMCP_DEBUG") != "" {
-		log.Printf("Removing temporary file %s", tempPath)
-	}
+	jobs := make(chan *uploadJob, 20)
+	var wg sync.WaitGroup
 
-	err = cleanupContent(client, tempPath)
-	if err != nil {
-		return fmt.Errorf("Error removing temporary file %s: %v", tempPath, err)
-	}
-
-	return nil
-}
-
-func uploadContent(client *winrm.Client, maxChunks int, filePath string, reader io.Reader) error {
-	var err error
-	done := false
-	for !done {
-		done, err = uploadChunks(client, filePath, maxChunks, reader)
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func uploadChunks(client *winrm.Client, filePath string, maxChunks int, reader io.Reader) (bool, error) {
-	shell, err := client.CreateShell()
-	if err != nil {
-		return false, fmt.Errorf("Couldn't create shell: %v", err)
-	}
-	defer shell.Close()
-
-	// Upload the file in chunks to get around the Windows command line size limit.
-	// Base64 encodes each set of three bytes into four bytes. In addition the output
-	// is padded to always be a multiple of four.
-	//
-	//   ceil(n / 3) * 4 = m1 - m2
-	//
-	//   where:
-	//     n  = bytes
-	//     m1 = max (8192 character command limit.)
-	//     m2 = len(filePath)
-
-	chunkSize := ((8000 - len(filePath)) / 4) * 3
-	chunk := make([]byte, chunkSize)
-
-	if maxChunks == 0 {
-		maxChunks = 1
-	}
-
-	for i := 0; i < maxChunks; i++ {
-		n, err := reader.Read(chunk)
+	for i := 0; ; i++ {
+		tempPathChunk := fmt.Sprintf(tempFile, i)
+		cs := chunkSize(tempPathChunk)
+		chunk := make([]byte, cs)
+		n, err := buf.Read(chunk)
 
 		if err != nil && err != io.EOF {
-			return false, err
+			return err
 		}
 		if n == 0 {
-			return true, nil
+			break
 		}
 
-		content := base64.StdEncoding.EncodeToString(chunk[:n])
-		if err = appendContent(shell, filePath, content); err != nil {
-			return false, err
-		}
+		log.Printf("making job %s. Uploading to %s", i, tempPathChunk)
+		wg.Add(1)
+		jobs <- &uploadJob{tempPathChunk, chunk, n}
 	}
+	for i := 0; i < 3; i++ {
+		go func() {
+			for j := range jobs {
+				if err := appendContent(client, j.uploadPath, string(j.chunk[:j.n])); err != nil {
+					log.Println(err)
+				} else {
+					log.Println("append okay!")
+				}
 
-	return false, nil
+				wg.Done()
+			}
+		}()
+	}
+	wg.Wait()
+
+	/*
+		done := false
+		for !done {
+			done, err = uploadChunks(client, tempPath, config.MaxOperationsPerShell, buf)
+			if err != nil {
+				return fmt.Errorf("Error uploading file to %s: %v", tempPath, err)
+			}
+		}
+
+		if os.Getenv("WINRMCP_DEBUG") != "" {
+			log.Printf("Moving file from %s to %s", tempPath, toPath)
+		}
+
+		err = restoreContent(client, tempPath, toPath)
+		if err != nil {
+			return fmt.Errorf("Error restoring file from %s to %s: %v", tempPath, toPath, err)
+		}
+
+		if os.Getenv("WINRMCP_DEBUG") != "" {
+			log.Printf("Removing temporary file %s", tempPath)
+		}
+
+		err = cleanupContent(client, tempPath)
+		if err != nil {
+			return fmt.Errorf("Error removing temporary file %s: %v", tempPath, err)
+		}
+	*/
+
+	return nil
+}
+
+func chunkSize(filePath string) int {
+	// Upload the file in chunks to get around the Windows command line size limit.
+
+	//return 8192 - len(filePath)
+	return 8000 - len(filePath)
 }
 
 func restoreContent(client *winrm.Client, fromPath, toPath string) error {
@@ -203,39 +225,23 @@ func cleanupContent(client *winrm.Client, filePath string) error {
 	return nil
 }
 
-func appendContent(shell *winrm.Shell, filePath, content string) error {
-	cmd, err := shell.Execute(fmt.Sprintf("echo %s >> \"%s\"", content, filePath))
+func appendContent(client *winrm.Client, filePath, content string) error {
+	scmd := fmt.Sprintf(`echo "%s" > "%s"`, strings.TrimSpace(content), filePath)
+	//scmd := fmt.Sprintf(`echo foob > "%s"`, filePath)
+	//scmd := `echo "foo" > "C:\\Users\\vagrant\\xyz2"`
+
+	log.Printf("Appending content: %d, %q", len(scmd), scmd)
+
+	out, errs, code, err := client.RunWithString(scmd, "")
+	fmt.Printf("out: %s\nerrs: %s\n", out, errs)
 
 	if err != nil {
 		return err
 	}
-
-	defer cmd.Close()
-	var wg sync.WaitGroup
-	copyFunc := func(w io.Writer, r io.Reader) {
-		defer wg.Done()
-		io.Copy(w, r)
+	if code != 0 {
+		return fmt.Errorf("upload operation returned code=%d", code)
 	}
-
-	wg.Add(2)
-	go copyFunc(os.Stdout, cmd.Stdout)
-	go copyFunc(os.Stderr, cmd.Stderr)
-
-	cmd.Wait()
-	wg.Wait()
-
-	if cmd.ExitCode() != 0 {
-		return fmt.Errorf("upload operation returned code=%d", cmd.ExitCode())
-	}
+	log.Println("Done")
 
 	return nil
-}
-
-func tempFileName() (string, error) {
-	uniquePart, err := uuid.NewV4()
-	if err != nil {
-		return "", err
-	}
-
-	return fmt.Sprintf("winrmcp-%s.tmp", uniquePart), nil
 }
