@@ -55,7 +55,31 @@ func doCopy(client *winrm.Client, config *Config, in io.Reader, toPath string) e
 	}
 
 	jobs := make(chan *uploadJob, 2000)
+	concurrentUploads := 30
+	done := make(chan struct{})
 	var wg sync.WaitGroup
+
+	for i := 0; i < concurrentUploads; i++ {
+		go func() {
+			for {
+				select {
+				case j := <-jobs:
+					if err := retry(func() error {
+						return writeChunk(client, j.uploadPath, string(j.chunk[:j.n]))
+					}, 3); err != nil {
+						for i := 0; i < concurrentUploads; i++ {
+							done <- struct{}{}
+						}
+						log.Printf("error appending: %s", err)
+					}
+					wg.Done()
+				case <-done:
+					return
+				}
+
+			}
+		}()
+	}
 
 	for i := 0; ; i++ {
 		tempPathChunk := fmt.Sprintf(tempFile, i)
@@ -74,20 +98,7 @@ func doCopy(client *winrm.Client, config *Config, in io.Reader, toPath string) e
 		wg.Add(1)
 		jobs <- &uploadJob{tempPathChunk, chunk, n}
 	}
-	concurrentUploads := 1
-	for i := 0; i < concurrentUploads; i++ {
-		go func() {
-			for j := range jobs {
-				if err := appendContent(client, j.uploadPath, string(j.chunk[:j.n])); err != nil {
-					log.Println(err)
-				} else {
-					log.Println("append okay!")
-				}
 
-				wg.Done()
-			}
-		}()
-	}
 	wg.Wait()
 
 	/*
@@ -117,6 +128,38 @@ func doCopy(client *winrm.Client, config *Config, in io.Reader, toPath string) e
 			return fmt.Errorf("Error removing temporary file %s: %v", tempPath, err)
 		}
 	*/
+
+	return nil
+}
+
+type RetryableFunc func() error
+
+func retry(f RetryableFunc, maxTries int) error {
+	var err error
+	for i := 0; i < maxTries; i++ {
+		err = f()
+		if err != nil {
+			continue
+		}
+		return nil
+	}
+	return fmt.Errorf("Retries exhausted: %s", err.Error())
+}
+
+func writeChunk(client *winrm.Client, filePath, content string) error {
+	scmd := fmt.Sprintf(`echo "%s" > "%s"`, content, filePath)
+
+	//log.Printf("Appending content: (len=%d), %s", len(scmd), scmd)
+
+	out, errs, code, err := client.RunWithString(scmd, "")
+	fmt.Printf("out: %s\nerrs: %s\n", out, errs)
+
+	if err != nil {
+		return err
+	}
+	if code != 0 {
+		return fmt.Errorf("upload operation returned code=%d", code)
+	}
 
 	return nil
 }
@@ -222,24 +265,5 @@ func cleanupContent(client *winrm.Client, filePath string) error {
 	if cmd.ExitCode() != 0 {
 		return fmt.Errorf("cleanup operation returned code=%d", cmd.ExitCode())
 	}
-	return nil
-}
-
-func appendContent(client *winrm.Client, filePath, content string) error {
-	scmd := fmt.Sprintf(`echo "%s" > "%s"`, content, filePath)
-
-	log.Printf("Appending content: (len=%d), %s", len(scmd), scmd)
-
-	out, errs, code, err := client.RunWithString(scmd, "")
-	fmt.Printf("out: %s\nerrs: %s\n", out, errs)
-
-	if err != nil {
-		return err
-	}
-	if code != 0 {
-		return fmt.Errorf("upload operation returned code=%d", code)
-	}
-	log.Println("Done")
-
 	return nil
 }
