@@ -9,7 +9,6 @@ import (
 	"io"
 	"log"
 	"os"
-	"path"
 	"sync"
 
 	"github.com/masterzen/winrm"
@@ -29,6 +28,7 @@ func doCopy(client *winrm.Client, config *Config, in io.Reader, toPath string) e
 	}
 
 	tempFile := fmt.Sprintf("%%%%TEMP%%%%\\winrmcp-%s-%%d.tmp", uniquePart)
+	//tempFile := fmt.Sprintf("$env:TEMP\\winrmcp-%s-%%d.tmp", uniquePart)
 	//tempFile := fmt.Sprintf("C:\\Users\\vagrant\\winrmcp-%s-%%d", uniquePart)
 
 	// Create a buffer to write our archive to.
@@ -38,7 +38,7 @@ func doCopy(client *winrm.Client, config *Config, in io.Reader, toPath string) e
 
 	// Create a new zip archive.
 	w := zip.NewWriter(b64Enc)
-	f, err := w.Create(path.Base(toPath))
+	f, err := w.Create(toPath)
 	if err != nil {
 		return err
 	}
@@ -58,7 +58,7 @@ func doCopy(client *winrm.Client, config *Config, in io.Reader, toPath string) e
 	jobs := make(chan *uploadJob, 2000)
 	concurrentUploads := 30
 	done := make(chan struct{})
-	defer close(done)
+	//defer close(done)
 	var wg sync.WaitGroup
 
 	wg.Add(concurrentUploads)
@@ -71,8 +71,10 @@ func doCopy(client *winrm.Client, config *Config, in io.Reader, toPath string) e
 					if err := retry(func() error {
 						return writeChunk(client, j.uploadPath, string(j.chunk[:j.n]))
 					}, 3); err != nil {
-						log.Printf("error appending: %s", err)
-						done <- struct{}{}
+						log.Printf("error writing chunk: %s", err)
+						go func() {
+							done <- struct{}{}
+						}()
 					}
 					select {
 					case <-done:
@@ -109,32 +111,36 @@ func doCopy(client *winrm.Client, config *Config, in io.Reader, toPath string) e
 	close(jobs)
 	wg.Wait()
 
+	coalesce(client, toPath)
+
 	/*
-		done := false
-		for !done {
-			done, err = uploadChunks(client, tempPath, config.MaxOperationsPerShell, buf)
-			if err != nil {
-				return fmt.Errorf("Error uploading file to %s: %v", tempPath, err)
+
+		/*
+			done := false
+			for !done {
+				done, err = uploadChunks(client, tempPath, config.MaxOperationsPerShell, buf)
+				if err != nil {
+					return fmt.Errorf("Error uploading file to %s: %v", tempPath, err)
+				}
 			}
-		}
 
-		if os.Getenv("WINRMCP_DEBUG") != "" {
-			log.Printf("Moving file from %s to %s", tempPath, toPath)
-		}
+			if os.Getenv("WINRMCP_DEBUG") != "" {
+				log.Printf("Moving file from %s to %s", tempPath, toPath)
+			}
 
-		err = restoreContent(client, tempPath, toPath)
-		if err != nil {
-			return fmt.Errorf("Error restoring file from %s to %s: %v", tempPath, toPath, err)
-		}
+			err = restoreContent(client, tempPath, toPath)
+			if err != nil {
+				return fmt.Errorf("Error restoring file from %s to %s: %v", tempPath, toPath, err)
+			}
 
-		if os.Getenv("WINRMCP_DEBUG") != "" {
-			log.Printf("Removing temporary file %s", tempPath)
-		}
+			if os.Getenv("WINRMCP_DEBUG") != "" {
+				log.Printf("Removing temporary file %s", tempPath)
+			}
 
-		err = cleanupContent(client, tempPath)
-		if err != nil {
-			return fmt.Errorf("Error removing temporary file %s: %v", tempPath, err)
-		}
+			err = cleanupContent(client, tempPath)
+			if err != nil {
+				return fmt.Errorf("Error removing temporary file %s: %v", tempPath, err)
+			}
 	*/
 
 	return nil
@@ -156,9 +162,19 @@ func retry(f RetryableFunc, maxTries int) error {
 	return fmt.Errorf("Retries exhausted: %s", err.Error())
 }
 
-func writeChunk(client *winrm.Client, filePath, content string) error {
-	scmd := fmt.Sprintf(`echo "%s" > "%s"`, content, filePath)
+func chunkSize(filePath string) int {
+	// Upload the file in chunks to get around the Windows command line size limit.
 
+	//return 8192 - len(filePath)
+	return 7000 - len(filePath)
+}
+
+func writeChunk(client *winrm.Client, filePath, content string) error {
+	// this one works with %TEMP% path
+	//scmd := fmt.Sprintf(`powershell.exe -Command "& {Set-Content -NoNewLine -Value '%s' -Path '%s'}"`, content, filePath)
+	scmd := fmt.Sprintf(`echo %s> "%s"`, content, filePath)
+
+	log.Println(scmd)
 	log.Printf("Appending content: (len=%d)", len(scmd))
 
 	_, _, code, err := client.RunWithString(scmd, "")
@@ -173,72 +189,29 @@ func writeChunk(client *winrm.Client, filePath, content string) error {
 	return nil
 }
 
-func chunkSize(filePath string) int {
-	// Upload the file in chunks to get around the Windows command line size limit.
-
-	//return 8192 - len(filePath)
-	return 7500 - len(filePath)
-}
-
-func restoreContent(client *winrm.Client, fromPath, toPath string) error {
+func coalesce(client *winrm.Client, toPath string) error {
 	shell, err := client.CreateShell()
 	if err != nil {
 		return err
 	}
 
 	defer shell.Close()
-	script := fmt.Sprintf(`
-		$tmp_file_path = [System.IO.Path]::GetFullPath("%s")
-		$dest_file_path = [System.IO.Path]::GetFullPath("%s".Trim("'"))
-		if (Test-Path $dest_file_path) {
-			rm $dest_file_path
-		}
-		else {
-			$dest_dir = ([System.IO.Path]::GetDirectoryName($dest_file_path))
-			New-Item -ItemType directory -Force -ErrorAction SilentlyContinue -Path $dest_dir | Out-Null
-		}
+	script := fmt.Sprintf(`Add-Type -AssemblyName System.IO.Compression.FileSystem
 
-		if (Test-Path $tmp_file_path) {
-			$reader = [System.IO.File]::OpenText($tmp_file_path)
-			$writer = [System.IO.File]::OpenWrite($dest_file_path)
-			try {
-				for(;;) {
-					$base64_line = $reader.ReadLine()
-					if ($base64_line -eq $null) { break }
-					$bytes = [System.Convert]::FromBase64String($base64_line)
-					$writer.write($bytes, 0, $bytes.Length)
-				}
-			}
-			finally {
-				$reader.Close()
-				$writer.Close()
-			}
-		} else {
-			echo $null > $dest_file_path
-		}
-	`, fromPath, toPath)
+	Get-ChildItem $env:TEMP\winrmcp-*.tmp | Sort-Object {[int]$_.Name.Split("-.")[6]} | Get-Content -raw | foreach-object {$_ -replace "` + "`" + `n", ""} | Out-File -NoNewline $env:TEMP\combined.zip.b64
+	$base64string = Get-Content -raw $env:TEMP\combined.zip.b64
+	[IO.File]::WriteAllBytes("$env:TEMP\combined.zip", [Convert]::FromBase64String($base64string))
+	[System.IO.Compression.ZipFile]::ExtractToDirectory("$env:TEMP\combined.zip", ".")
+	`)
 
-	cmd, err := shell.Execute(winrm.Powershell(script))
+	a, b, code, err := client.RunWithString(winrm.Powershell(script), "")
 	if err != nil {
 		return err
 	}
-	defer cmd.Close()
+	fmt.Println(a, b)
 
-	var wg sync.WaitGroup
-	copyFunc := func(w io.Writer, r io.Reader) {
-		defer wg.Done()
-		io.Copy(w, r)
-	}
-
-	wg.Add(2)
-	go copyFunc(os.Stdout, cmd.Stdout)
-	go copyFunc(os.Stderr, cmd.Stderr)
-
-	cmd.Wait()
-	wg.Wait()
-
-	if cmd.ExitCode() != 0 {
-		return fmt.Errorf("restore operation returned code=%d", cmd.ExitCode())
+	if code != 0 {
+		return fmt.Errorf("restore operation returned code=%d", code)
 	}
 	return nil
 }
